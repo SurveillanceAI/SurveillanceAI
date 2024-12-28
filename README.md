@@ -55,3 +55,9 @@ The primary users are small to medium-sized shop owners who already have securit
 - **Data Sources**: Video data from shops, open datasets (e.g., Kaggle), and custom recordings.
 - **Infrastructure**: GPU clusters from the college for computation.
 - **Compliance**: Ensuring data privacy and ethics through agreements with shops for video usage.
+
+## 7. Architecture
+[SurveillanceAI Architecture Link](https://miro.com/welcomeonboard/aGtOaFc3U0hIbUM1N1RVZ0llVU9hODgzSDhpdlArRS93dWU0L0ZnWjVtRmE3aFpDNkJIUTlja1hWSTZqOGYvaVl4SXJjdWc5bUdaWWZzM2ZFT3UzeitDVjhsa3RrZGY1ck56eURXRlRsQ1hGNzJneVJTOXNJeVNleFJGanNkcVkhZQ==?share_link_id=51101420273)
+
+## 8. Design Files
+[Google Drive Link](https://drive.google.com/drive/folders/1hDAkcp4iB7m3zeJVwypk3tTqdVhE3TEP)
