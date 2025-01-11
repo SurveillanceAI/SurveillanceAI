@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Union
 from vertexai.generative_models._generative_models import PartsType, GenerationConfigType, SafetySettingsType
 
 
-class CvModel(GenerativeModel):
+class ComputerVisionModel(GenerativeModel):
 
     default_system_instruction = [
         "You are a highly skilled security guard working at a retail store.",
