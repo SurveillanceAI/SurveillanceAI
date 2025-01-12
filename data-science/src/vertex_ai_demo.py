@@ -2,16 +2,30 @@ from vertexai.generative_models import Part
 import vertexai
 from google.auth.transport.requests import Request
 from google.oauth2.service_account import Credentials
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, TypedDict, Union
 import numpy as np
 import pickle
 from ComputerVisionModel import ComputerVisionModel
-from PromptModel import PromptModel
+from PromptModel import PromptModel, VideoAnalysisState
 from AnalysisModel import AnalysisModel
 import datetime
 from google.cloud import storage
 import os
 import pandas as pd
+from langgraph.graph import StateGraph, END
+
+
+class AnalysisState(TypedDict):
+    video_uri: str
+    video_file: Part
+    confidence_levels: List[float]
+    shoplifting_detected_results: List[bool]
+    prompt_model_responses: List[str]
+    cv_model_responses: List[str]
+    analysis_model_responses: List[str]
+    current_try: int
+    max_tries: int
+
 
 def get_credentials() -> Credentials:
     # Search "How to Use Vertex AI API in Google Cloud" video in Youtube at timestamp 2:40 for tutorial how to download this json. provide the path of the downloaded json here.
@@ -68,49 +82,108 @@ def get_results_for_video(video_uri: str):
     cv_model = ComputerVisionModel()
     prompt_model = PromptModel()
     analysis_model = AnalysisModel()
-    confidence_levels = []
-    shoplifting_detected_results = []
-    prompt_model_responses = []
-    cv_model_responses = []
-    analysis_model_responses = []
-    max_tries = 5
 
-    while should_continue(confidence_levels, max_tries):
-        video_file = Part.from_uri(uri=video_uri,
-                                   mime_type="video/mp4")
-        prompt_model_response = prompt_model.generate_prompt(video_file)
-        cv_model_response = cv_model.analyze_video(video_file, prompt_model_response)
-        analysis_model_response, shoplifting_detected, confidence_level = analysis_model.analyze_video_observations(
-            video_file, cv_model_response)
-        print(f"Shoplifting Detected: {shoplifting_detected}")
-        print(f"Confidence Level: {confidence_level}")
-        confidence_levels.append(confidence_level)
-        shoplifting_detected_results.append(shoplifting_detected)
-        prompt_model_responses.append(prompt_model_response)
-        cv_model_responses.append(cv_model_response)
-        analysis_model_responses.append(analysis_model_response)
+    # Create the analysis workflow
+    workflow = _create_analysis_workflow(cv_model, prompt_model, analysis_model)
 
-    analysis = analyze_detection_results(confidence_levels, shoplifting_detected_results)
-    print(analysis)
+    # Initialize the state
+    initial_state = {
+        "video_uri": video_uri,
+        "video_file": Part.from_uri(uri=video_uri, mime_type="video/mp4"),
+        "confidence_levels": [],
+        "shoplifting_detected_results": [],
+        "prompt_model_responses": [],
+        "cv_model_responses": [],
+        "analysis_model_responses": [],
+        "current_try": 0,
+        "max_tries": 5
+    }
 
+    # Run the workflow
+    final_state = workflow.invoke(initial_state)
+
+    # Generate analysis of results
+    analysis = analyze_detection_results(
+        final_state["confidence_levels"], 
+        final_state["shoplifting_detected_results"]
+    )
+
+    # Prepare result dictionary
     result = {
         "video_uri": video_uri,
-        "confidence_levels": confidence_levels,
-        "shoplifting_detected_results": shoplifting_detected_results,
-        "prompt_model_responses": prompt_model_responses,
-        "cv_model_responses": cv_model_responses,
-        "analysis_model_responses": analysis_model_responses,
+        "confidence_levels": final_state["confidence_levels"],
+        "shoplifting_detected_results": final_state["shoplifting_detected_results"],
+        "prompt_model_responses": final_state["prompt_model_responses"],
+        "cv_model_responses": final_state["cv_model_responses"],
+        "analysis_model_responses": final_state["analysis_model_responses"],
         "analysis": analysis
     }
 
+    # Save results
     current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     pkl_path = f"video_analysis_{current_time}.pkl"
-
     with open(pkl_path, 'wb') as file:
         pickle.dump(result, file)
 
     print(f"Finished with {video_uri}, results saved to {pkl_path}")
     return result
+
+def _should_continue(state: AnalysisState) -> bool:
+    """Determine if analysis should continue based on current state"""
+    confidence_levels = state["confidence_levels"]
+    current_try = state["current_try"]
+    max_tries = state["max_tries"]
+    
+    return (not confidence_levels or confidence_levels[-1] < 0.9) and current_try < max_tries and not has_reached_plateau(confidence_levels)
+
+def _process_video(state: AnalysisState) -> Union[AnalysisState, str]:
+    """Process one iteration of video analysis"""
+    if not _should_continue(state):
+        return END
+
+    # Get models from state (in practice, you might want to handle this differently)
+    cv_model = ComputerVisionModel()
+    prompt_model = PromptModel()
+    analysis_model = AnalysisModel()
+
+    # Run analysis
+    prompt_response = prompt_model.analyze_video_for_shoplifting(state["video_file"])
+    cv_response = cv_model.analyze_video(state["video_file"], prompt_response)
+    analysis_response, shoplifting_detected, confidence_level = analysis_model.analyze_video_observations(
+        state["video_file"], cv_response
+    )
+
+    # Update state
+    state["current_try"] += 1
+    state["confidence_levels"].append(confidence_level)
+    state["shoplifting_detected_results"].append(shoplifting_detected)
+    state["prompt_model_responses"].append(prompt_response)
+    state["cv_model_responses"].append(cv_response)
+    state["analysis_model_responses"].append(analysis_response)
+
+    print(f"Try {state['current_try']}: Shoplifting Detected: {shoplifting_detected}")
+    print(f"Try {state['current_try']}: Confidence Level: {confidence_level}")
+
+    return state
+
+def _create_analysis_workflow(cv_model: ComputerVisionModel, 
+                            prompt_model: PromptModel, 
+                            analysis_model: AnalysisModel) -> StateGraph:
+    """Create the analysis workflow graph"""
+    # Create the graph
+    workflow = StateGraph(AnalysisState)
+
+    # Add the processing node
+    workflow.add_node("process_video", _process_video)
+
+    # Add edges
+    workflow.add_edge("process_video", "process_video")
+    workflow.add_edge("process_video", END)
+
+    # Set the entry point
+    workflow.set_entry_point("process_video")
+
+    return workflow.compile()
 
 def get_videos_uris_and_names(bucket_name):
     # Initialize the Google Cloud Storage client

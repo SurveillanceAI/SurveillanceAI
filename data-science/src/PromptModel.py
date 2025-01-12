@@ -1,3 +1,6 @@
+from langchain_google_vertexai import VertexAI as LangChainVertexAI
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
 from vertexai.generative_models import (
     GenerationConfig,
     GenerativeModel,
@@ -6,13 +9,19 @@ from vertexai.generative_models import (
     Part,
     Image
 )
-
-from typing import Dict, List, Optional, Union
+from langgraph.graph import StateGraph, END
+from typing import Dict, List, Optional, Union, TypedDict, Annotated
 from vertexai.generative_models._generative_models import PartsType, GenerationConfigType, SafetySettingsType
 
 
-class PromptModel(GenerativeModel):
+class VideoAnalysisState(TypedDict):
+    video_file: Part
+    video_description: Optional[str]
+    analysis_result: Optional[str]
+    system_instruction: str
 
+
+class PromptModel:
     default_system_instruction = [
         "As an assistant to the cv_model, your primary function is to help it perform its duties as a virtual security guard in a retail environment.",
         "Your role is to craft detailed prompts that will enable the cv_model to monitor customer behavior accurately and identify potential shoplifting activities by breaking down these complex tasks into smaller, more manageable steps.",
@@ -70,25 +79,110 @@ class PromptModel(GenerativeModel):
         if safety_settings is None:
             safety_settings = self.default_safety_settings
 
-        super().__init__(model_name=model_name
-                         , generation_config=generation_config
-                         , safety_settings=safety_settings
-                         , system_instruction=system_instruction
-                         , labels=labels)
-
-
-    def generate_prompt(self, video_file: Part, prompt: str = "Generate a prompt that instructs the cv_model to effectively monitor customer behavior"
-                                                              " and identify potential shoplifting activities in a retail environment in the attached video,"
-                                                              "following the 'chain of thought' method to break down complex tasks into smaller, more manageable steps.") -> str:
-        # Set contents to send to the model
-        contents = [video_file, prompt]
-        # Prompt the model to generate content
-        response = self.generate_content(
-            contents,
-            generation_config=self._generation_config,
-            safety_settings=self._safety_settings,
+        # Initialize LangChain VertexAI
+        self.langchain_llm = LangChainVertexAI(
+            model_name=model_name,
+            temperature=generation_config.temperature,
+            top_p=generation_config.top_p,
+            top_k=generation_config.top_k,
+            max_output_tokens=generation_config.max_output_tokens,
         )
 
-        return response.text
+        # Create a prompt template for video description
+        self.video_description_template = PromptTemplate(
+            input_variables=["video"],
+            template="""
+            Please provide a detailed description of the video, focusing on:
+            1. Customer movements and behaviors
+            2. Interactions with store items and environment
+            3. Temporal sequence of events
+            4. Notable actions or patterns
+            5. Relevant details about the store layout and context
+            
+            Video: {video}
+            """
+        )
+
+        # Create a prompt template for analysis
+        self.video_analysis_template = PromptTemplate(
+            input_variables=["system_instruction", "video_description"],
+            template="""
+            {system_instruction}
+            
+            Based on the following video description, generate a detailed prompt that will help the CV model identify potential shoplifting activities. Focus specifically on:
+            1. Suspicious movements and behaviors that might indicate shoplifting
+            2. Patterns of customer interaction with merchandise
+            3. Any attempts to conceal items or avoid detection
+            4. Customer paths through the store, especially near exits
+            5. Interactions (or lack thereof) with store staff and payment areas
+            
+            Video Description:
+            {video_description}
+            
+            Generate a structured analysis following the chain-of-thought method, breaking down the complex task of shoplifting detection into clear, actionable steps.
+            """
+        )
+
+        # Create the LangChains
+        self.description_chain = LLMChain(
+            llm=self.langchain_llm,
+            prompt=self.video_description_template
+        )
+        
+        self.analysis_chain = LLMChain(
+            llm=self.langchain_llm,
+            prompt=self.video_analysis_template
+        )
+
+        # Create the workflow graph
+        self.workflow = self._create_workflow()
+
+    def _describe_video(self, state: Annotated[VideoAnalysisState, "The current state"]) -> VideoAnalysisState:
+        """Generate a description of the video"""
+        video_description = self.description_chain.run(video=str(state["video_file"]))
+        state["video_description"] = video_description
+        return state
+
+    def _analyze_video(self, state: Annotated[VideoAnalysisState, "The current state"]) -> VideoAnalysisState:
+        """Analyze the video description for shoplifting behavior"""
+        result = self.analysis_chain.run(
+            system_instruction=state["system_instruction"],
+            video_description=state["video_description"]
+        )
+        state["analysis_result"] = result
+        return state
+
+    def _create_workflow(self) -> StateGraph:
+        """Create the LangGraph workflow"""
+        # Create the graph
+        workflow = StateGraph(VideoAnalysisState)
+
+        # Add nodes for each step
+        workflow.add_node("describe_video", self._describe_video)
+        workflow.add_node("analyze_video", self._analyze_video)
+
+        # Create the edges
+        workflow.add_edge("describe_video", "analyze_video")
+        workflow.add_edge("analyze_video", END)
+
+        # Set the entry point
+        workflow.set_entry_point("describe_video")
+
+        return workflow.compile()
+
+    def analyze_video_for_shoplifting(self, video_file: Part) -> str:
+        """Run the video analysis workflow"""
+        # Initialize the state
+        initial_state = {
+            "video_file": video_file,
+            "video_description": None,
+            "analysis_result": None,
+            "system_instruction": "\n".join(self.default_system_instruction)
+        }
+
+        # Run the workflow
+        final_state = self.workflow.invoke(initial_state)
+        
+        return final_state["analysis_result"]
 
 
